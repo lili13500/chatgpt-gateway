@@ -12,7 +12,7 @@ probe.Open "GET", "http://127.0.0.1:18080/health", False
 probe.Send
 If Err.Number = 0 Then
     If probe.Status = 200 Then
-        If InStr(probe.responseText, "chatgpt-web-extension") > 0 Then WScript.Quit 0
+        If InStr(probe.responseText, "chatgpt-web-tampermonkey") > 0 Then WScript.Quit 0
     End If
 End If
 Err.Clear

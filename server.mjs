@@ -1,6 +1,7 @@
 // Local OpenAI-compatible relay for the ChatGPT *web page*, not the OpenAI API.
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { WebSocketServer } from "ws";
 
 const HOST = "127.0.0.1";
@@ -110,14 +111,19 @@ function dispatchNext() {
 function receive(msg) {
   if (typeof msg !== "object" || !msg || typeof msg.requestId !== "string") return;
   const entry = pending.get(msg.requestId);
-  if (msg.type === "progress" && entry && entry.stream && activeId === msg.requestId) {
-    const current = String(msg.content ?? "");
-    if (current.startsWith(entry.sent)) {
-      const diff = current.slice(entry.sent.length);
-      if (diff) {
-        entry.sent = current;
-        sse(entry.res, chunk(entry, diff));
+  if (msg.type === "progress" && entry && activeId === msg.requestId) {
+    if (typeof msg.delta === "string") {
+      if (msg.offset !== entry.sent.length) {
+        finish(msg.requestId, { ok: false, error: "Out-of-order browser stream chunk" });
+        return;
       }
+      entry.sent += msg.delta;
+      if (entry.stream && msg.delta) sse(entry.res, chunk(entry, msg.delta));
+    } else if (typeof msg.content === "string" && msg.content.startsWith(entry.sent)) {
+      // Keep compatibility with existing extension clients.
+      const diff = msg.content.slice(entry.sent.length);
+      entry.sent = msg.content;
+      if (entry.stream && diff) sse(entry.res, chunk(entry, diff));
     }
   } else if (msg.type === "response" && activeId === msg.requestId) {
     finish(msg.requestId, msg);
@@ -150,6 +156,7 @@ wss.on("connection", ws => {
 const server = createServer(async (req, res) => {
   const origin = req.headers.origin;
   const originAllowed = !origin || origin === "null" ||
+    origin === "https://chatgpt.com" || origin === "https://chat.openai.com" ||
     /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(origin) ||
     /^(?:app|tauri|capacitor|file):\/\//.test(origin) ||
     /^(?:chrome|moz)-extension:\/\//.test(origin);
@@ -158,10 +165,15 @@ const server = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") return res.writeHead(204).end();
+  if (req.method === "GET" && req.url === "/chatgpt-gateway.user.js") {
+    const script = await readFile(new URL("./chatgpt-gateway.user.js", import.meta.url));
+    res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store" });
+    return res.end(script);
+  }
   if (req.method === "GET" && req.url === "/health") {
-    return json(res, 200, { status: "ok", extensionConnected: ready(),
+    return json(res, 200, { status: "ok", userscriptConnected: ready(), extensionConnected: ready(),
       pendingRequests: pending.size, queued: queue.filter(id => pending.has(id)).length,
-      active: !!activeId, transport: "chatgpt-web-extension" });
+      active: !!activeId, transport: "chatgpt-web-tampermonkey" });
   }
   if (req.method === "GET" && req.url === "/v1/models") {
     return json(res, 200, { object: "list", data: [{ id: "auto", object: "model", owned_by: "chatgpt-web" }] });
@@ -169,7 +181,7 @@ const server = createServer(async (req, res) => {
   if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
     return json(res, 404, { error: "Not found" });
   }
-  if (!ready()) return json(res, 503, { error: { message: "ChatGPT browser extension not connected", type: "upstream_error" } });
+  if (!ready()) return json(res, 503, { error: { message: "ChatGPT 油猴脚本尚未连接（打开专用网页标签）。", type: "upstream_error" } });
   let payload;
   try {
     const parts = [];
@@ -211,7 +223,8 @@ const server = createServer(async (req, res) => {
 server.on("upgrade", (req, socket, head) => {
   const origin = req.headers.origin || "";
   const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(socket.remoteAddress);
-  if (!local || req.url !== "/ws" || !/^(?:chrome|moz)-extension:\/\//.test(origin)) {
+  const browser = origin === "https://chatgpt.com" || origin === "https://chat.openai.com";
+  if (!local || req.url !== "/ws" || !(browser || /^(?:chrome|moz)-extension:\/\//.test(origin))) {
     socket.destroy();
     return;
   }
@@ -219,5 +232,5 @@ server.on("upgrade", (req, socket, head) => {
 });
 server.on("error", error => { console.error("[gateway]", error.message); process.exitCode = 1; });
 server.listen(PORT, HOST, () => {
-  console.log("[gateway] local port " + PORT + "; awaiting browser extension");
+  console.log("[gateway] local port " + PORT + "; awaiting ChatGPT userscript");
 });

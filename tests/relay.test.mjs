@@ -27,9 +27,9 @@ async function harness(t) {
   assert.equal(health.status, "ok", logs);
   return { base, port, health: () => fetch(base + "/health").then(x => x.json()) };
 }
-function connect(port) {
+function connect(port, origin = "https://chatgpt.com") {
   const ws = new WebSocket("ws://127.0.0.1:" + port + "/ws", {
-    headers: { origin: "chrome-extension://testing-extension" },
+    headers: { origin },
   });
   return once(ws, "open").then(() => ws);
 }
@@ -40,7 +40,7 @@ const submit = (base, messages, stream = false, signal) => fetch(base + "/v1/cha
 const next = async ws => JSON.parse((await once(ws, "message"))[0].toString());
 const send = (ws, data) => ws.send(JSON.stringify(data));
 
-test("local-only API, model catalogue, no extension returns 503", async t => {
+test("local-only API, model catalogue, no userscript returns 503", async t => {
   const h = await harness(t);
   const resp = await submit(h.base, [{ role: "user", content: "你好" }]);
   assert.equal(resp.status, 503);
@@ -129,4 +129,48 @@ test("two parallel API requests are serialized at the browser, not dropped", asy
   send(ws, { type: "response", requestId: bb.requestId, ok: true, content: "B" });
   assert.equal((await (await first).json()).choices[0].message.content, "A");
   assert.equal((await (await second).json()).choices[0].message.content, "B");
+});
+
+
+test("the userscript installer serves valid JavaScript, with no Chrome extension dependency", async t => {
+  const h = await harness(t);
+  const resp = await fetch(h.base + "/chatgpt-gateway.user.js");
+  assert.equal(resp.status, 200);
+  assert.match(resp.headers.get("content-type"), /javascript/);
+  const js = await resp.text();
+  assert.match(js, /@name.*ChatGPT/);
+  assert.match(js, /@match.*chatgpt\.com/);
+  assert.match(js, /@connect\s+127\.0\.0\.1/);
+  assert.match(js, /new WebSocket/);
+});
+
+test("WebSocket with ChatGPT Origin header carries incremental UTF-8 chunks exactly", async t => {
+  const h = await harness(t);
+  const ws = await connect(h.port, "https://chatgpt.com");
+  t.after(() => ws.close());
+  const request = submit(h.base, [{ role: "user", content: "您好" }], true);
+  const packet = await next(ws);
+  const first = "你好，中".repeat(190);
+  send(ws, { type: "progress", requestId: packet.requestId, offset: 0, delta: first });
+  send(ws, { type: "progress", requestId: packet.requestId, offset: first.length, delta: "文结尾" });
+  send(ws, { type: "response", requestId: packet.requestId, ok: true, content: first + "文结尾" });
+  const resp = await request;
+  const raw = await resp.text();
+  const parts = raw.split("\n").filter(s => s.startsWith("data: ") && !s.includes("[DONE]"));
+  const actual = parts.map(s => JSON.parse(s.slice(6)).choices[0].delta.content || "").join("");
+  assert.equal(actual, first + "文结尾");
+  assert.match(raw, /data: \[DONE\]/);
+});
+
+test("a rewritten or truncated streaming result is an error, never a normal completion", async t => {
+  const h = await harness(t);
+  const ws = await connect(h.port);
+  t.after(() => ws.close());
+  const request = submit(h.base, [{ role: "user", content: "test" }], true);
+  const packet = await next(ws);
+  send(ws, { type: "progress", requestId: packet.requestId, offset: 0, delta: "已有内容" });
+  send(ws, { type: "response", requestId: packet.requestId, ok: true, content: "不一致的回答" });
+  const raw = await (await request).text();
+  assert.match(raw, /event: error/);
+  assert.doesNotMatch(raw, /data: \[DONE\]/);
 });

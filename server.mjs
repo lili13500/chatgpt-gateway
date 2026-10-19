@@ -154,6 +154,7 @@ wss.on("connection", ws => {
 });
 
 const server = createServer(async (req, res) => {
+  const requestPath = new URL(req.url || "/", "http://127.0.0.1").pathname;
   const origin = req.headers.origin;
   const originAllowed = !origin || origin === "null" ||
     origin === "https://chatgpt.com" || origin === "https://chat.openai.com" ||
@@ -165,20 +166,26 @@ const server = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") return res.writeHead(204).end();
-  if (req.method === "GET" && req.url === "/chatgpt-gateway.user.js") {
+  if (req.method === "GET" && requestPath === "/chatgpt-gateway.user.js") {
+    // ChatGPT appends ?utm_source=... to links. Strip it so browsers see
+    // the actual .user.js suffix for Tampermonkey install detection.
+    if (req.url !== requestPath) {
+      res.writeHead(302, { Location: requestPath, "Cache-Control": "no-store" });
+      return res.end();
+    }
     const script = await readFile(new URL("./chatgpt-gateway.user.js", import.meta.url));
     res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store" });
     return res.end(script);
   }
-  if (req.method === "GET" && req.url === "/health") {
+  if (req.method === "GET" && requestPath === "/health") {
     return json(res, 200, { status: "ok", userscriptConnected: ready(), extensionConnected: ready(),
       pendingRequests: pending.size, queued: queue.filter(id => pending.has(id)).length,
       active: !!activeId, transport: "chatgpt-web-tampermonkey" });
   }
-  if (req.method === "GET" && req.url === "/v1/models") {
+  if (req.method === "GET" && requestPath === "/v1/models") {
     return json(res, 200, { object: "list", data: [{ id: "auto", object: "model", owned_by: "chatgpt-web" }] });
   }
-  if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
+  if (req.method !== "POST" || requestPath !== "/v1/chat/completions") {
     return json(res, 404, { error: "Not found" });
   }
   if (!ready()) return json(res, 503, { error: { message: "ChatGPT 油猴脚本尚未连接（打开专用网页标签）。", type: "upstream_error" } });

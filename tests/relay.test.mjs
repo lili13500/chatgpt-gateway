@@ -138,6 +138,17 @@ test("the userscript installer serves valid JavaScript, with no Chrome extension
   assert.equal(resp.status, 200);
   assert.match(resp.headers.get("content-type"), /javascript/);
   const js = await resp.text();
+  const tracked = await fetch(h.base + "/chatgpt-gateway.user.js?utm_source=chatgpt.com");
+  assert.equal(tracked.status, 200);
+  assert.equal(tracked.url, h.base + "/chatgpt-gateway.user.js");
+  assert.equal(await tracked.text(), js);
+  const raw = await fetch(h.base + "/chatgpt-gateway.user.js?utm_source=chatgpt.com", { redirect: "manual" });
+  assert.equal(raw.status, 302);
+  assert.equal(raw.headers.get("location"), "/chatgpt-gateway.user.js");
+  const healthTracked = await fetch(h.base + "/health?utm_source=chatgpt.com");
+  assert.equal(healthTracked.status, 200);
+  const modelsTracked = await fetch(h.base + "/v1/models?utm_source=chatgpt.com");
+  assert.equal(modelsTracked.status, 200);
   assert.match(js, /@name.*ChatGPT/);
   assert.match(js, /@match.*chatgpt\.com/);
   assert.match(js, /@connect\s+127\.0\.0\.1/);

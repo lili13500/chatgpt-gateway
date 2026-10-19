@@ -1,187 +1,52 @@
-# ChatGPT Gateway
+# ChatGPT 网页桥接｜Windows 私人极简版
 
-> **Optimized successor:** for smooth ChatGPT **Pro** (extended thinking) access without
-> a manual browser tab, see [`camoufox-gateway/`](camoufox-gateway/) — a headless Camoufox
-> (stealth Firefox) with a persistent logged-in profile, auto-login, robust
-> response-completion, exposed as a Claude Code skill + MCP. This extension still works
-> for quick use in your everyday browser.
+源项目：<https://github.com/Draivix/chatgpt-gateway> · MIT License。保留上游 Git 历史和 LICENSE。
 
-Use ChatGPT from any code, script, or tool — without an API key.
+**定位：** 山海墨迹、Cherry Studio、酒馆等 OpenAI 兼容客户端，通过本机 HTTP 接口，把问题送到**正常登录的 ChatGPT 网页聊天**，再获取回答。不是 OpenAI API、Codex 或另外的模型调用通道。
 
-This is a browser extension paired with a tiny local server that exposes your **logged-in ChatGPT session** as a standard OpenAI-compatible API at `localhost:18790`. Any application that speaks the OpenAI chat completions format can use it out of the box — just swap the base URL.
+## 已部署的后台服务
 
-**Why?** OpenAI API access requires a separate paid plan and API keys. If you already have a ChatGPT subscription (Free, Plus, or Team), this tool lets you use it programmatically. It automates the ChatGPT web interface through your browser — exactly like you would manually, but from code.
+- 本机地址：`http://127.0.0.1:18080/v1`
+- API Key：本地客户端要求非空时可填 `local`；接口不向公网开放
+- 模型名：`auto`（沿用 ChatGPT 网页当前可用的模型，不额外调用模型服务）
+- 健康检查：`http://127.0.0.1:18080/health`
+- Windows 当前用户登录后自动启动 Node，**无 PowerShell 窗口**；一键启动文件为 `start-hidden.vbs`
 
-![ChatGPT Gateway Icon](icons/icon128.png)
+## 第一次安装 Chrome 扩展（需要一次浏览器确认）
 
-## How it works
+1. 正常打开你常用的 Chrome，确保已在 <https://chatgpt.com> 登录。
+2. 进入 `chrome://extensions`，启用「开发者模式」，点击「加载已解压的扩展程序」。
+3. 选择本项目内的 **`dist\chrome-extension`** 文件夹（不是旧 CommandTower 的插件）。
+4. 打开 `http://127.0.0.1:18080/health`，确认 `extensionConnected:true` 后再连接应用。
 
-```
-Your app / curl / any OpenAI-compatible client
-        ↓ HTTP POST (localhost:18790)
-Local gateway server (Node.js)
-        ↓ WebSocket
-Browser extension (background worker)
-        ↓ chrome.tabs message
-Content script on chatgpt.com
-        ↓ DOM automation (type → send → read response)
-ChatGPT (your logged-in browser session)
-```
+扩展将为请求创建一个**非当前焦点的临时 ChatGPT 标签页**，避免改动你正在聊天的标签页；完成后清理临时标签页。Chrome 必须处于运行状态，扩展才能接收任务。浏览器首次安装确认不能由服务端替代。
 
-The extension's content script types your message into ChatGPT's input field, clicks send, waits for the response to finish streaming, extracts the text, and returns it through the chain. The gateway server wraps the result in an OpenAI-compatible JSON response.
+## 三个应用通用填写
 
-## Can I keep using my browser?
+| 字段 | 设置 |
+| --- | --- |
+| 接口类型 | OpenAI 兼容 |
+| Base URL | `http://127.0.0.1:18080/v1` |
+| Key | `local` |
+| 模型 | `auto` |
 
-**Yes.** The extension only interacts with the ChatGPT tab. All other tabs work normally. You can browse, work, watch videos — whatever you want.
+## 行为
 
-The only rule: **don't manually type in the ChatGPT tab while a request is in progress.** The content script is actively using that tab's input field and reading the response DOM. Between requests, you can use ChatGPT manually as usual.
+- 不裁剪输入消息/历史记录，不自设请求长度或模型处理截止时间；网站自身的上下文/使用限制仍然存在。
+- `stream:true` 时，浏览器页面变化通过 SSE 实际增量返回，而非先缓存全文再假装流式。
+- 只在当前响应出现完成证据后返回正常结束；断线、浏览器拒绝、输出前后不一致时返回错误，**不把半截文本报告为完成**。
+- 同一时刻仅向网页发送一项任务，其他请求在内存排队，避免不同客户端同时操作同一个页面。
+- 本程序无后台模型调用。网站页面变化、扩展休眠或账户未登录可能中断请求；这时需要诊断，不应重复发送已经可能产生副作用的任务。
 
-You do **not** need a separate browser profile or window. Your everyday Chrome or Firefox works fine.
+## 开发与维护
 
-## Setup
-
-### 1. Install the extension
-
-**Chrome:**
-1. Go to `chrome://extensions`
-2. Enable **Developer mode** (toggle in top-right)
-3. Click **Load unpacked** → select this repo's root directory
-
-**Firefox:**
-1. Go to `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on** → select `manifest.firefox.json`
-
-### 2. Start the gateway server
-
-```bash
-npm install
-npm start
+```powershell
+npm ci
+npm test
+npm run build:chrome
+.\install-autostart.ps1
 ```
 
-### 3. Open ChatGPT
+Fork `master` 保留上游版本，`work/lean-extension-autostart` 是私人精简改造分支。
 
-Navigate to [chatgpt.com](https://chatgpt.com) and make sure you're logged in. Click the extension icon to verify — both dots should be green.
-
-## Usage
-
-### curl
-
-```bash
-curl -X POST http://localhost:18790/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}]}'
-```
-
-### Python
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:18790/v1", api_key="unused")
-response = client.chat.completions.create(
-    model="auto",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-print(response.choices[0].message.content)
-```
-
-### Node.js
-
-```javascript
-import OpenAI from "openai";
-
-const client = new OpenAI({ baseURL: "http://localhost:18790/v1", apiKey: "unused" });
-const response = await client.chat.completions.create({
-  model: "auto",
-  messages: [{ role: "user", content: "Hello!" }],
-});
-console.log(response.choices[0].message.content);
-```
-
-## API
-
-### `POST /v1/chat/completions`
-
-OpenAI-compatible chat completions endpoint.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `messages` | array | required | Array of `{role, content}` message objects |
-| `model` | string | `"auto"` | Model hint — attempts to select via ChatGPT's model picker |
-| `new_conversation` | boolean | `true` | Start a fresh chat for each request |
-| `timeout` | number | `180000` | Max wait time in ms for ChatGPT to respond |
-
-Response format matches the [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat/create).
-
-### `GET /health`
-
-```json
-{"status": "ok", "extensionConnected": true}
-```
-
-## MCP Server
-
-The `mcp/` directory contains a [Model Context Protocol](https://modelcontextprotocol.io) server that wraps the gateway. This lets AI tools like Claude Code use ChatGPT directly as a tool.
-
-### Install
-
-```bash
-cd mcp && npm install
-```
-
-### Configure (Claude Code)
-
-Add to your MCP settings (`~/.claude/settings.json` or project `.claude/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "chatgpt": {
-      "command": "node",
-      "args": ["/path/to/chatgpt-gateway/mcp/index.mjs"]
-    }
-  }
-}
-```
-
-### Tools
-
-| Tool | Description |
-|---|---|
-| `chatgpt_status` | Check if the gateway is running and extension is connected |
-| `chatgpt_ask` | Send a message to ChatGPT and get the response (10-120s, sends progress notifications) |
-
-The `chatgpt_ask` tool supports progress notifications per the MCP spec — clients will see status updates like "Typing message...", "Waiting for response..." while ChatGPT processes the request.
-
-## Project structure
-
-```
-├── manifest.json           # Chrome extension manifest (MV3)
-├── manifest.firefox.json   # Firefox extension manifest (MV3)
-├── background.js           # Service worker — WebSocket bridge to gateway
-├── content.js              # Content script — ChatGPT DOM automation
-├── popup.html / popup.js   # Extension popup — connection status UI
-├── server.mjs              # Gateway HTTP + WebSocket server
-├── icons/                  # Extension icons (16/32/48/128px)
-├── package.json            # Server dependencies
-└── mcp/                    # MCP server
-    ├── index.mjs           # MCP stdio server
-    └── package.json        # MCP dependencies
-```
-
-## Limitations
-
-- **One request at a time.** The extension automates a single ChatGPT tab, so requests are serialized. Concurrent requests will queue on the server side.
-- **No streaming.** Responses are returned after ChatGPT finishes generating. Streaming support may come later.
-- **DOM-dependent.** If ChatGPT significantly changes its UI, the content script selectors may need updating.
-- **Session-bound.** If your ChatGPT session expires, refresh the tab or re-login.
-
-## Requirements
-
-- Node.js 18+
-- Chrome or Firefox
-- Active ChatGPT session (Free, Plus, or Team)
-
-## License
-
-MIT
+**验收边界：** Node 网关本地 HTTP/WebSocket 与模拟内容脚本测试不能代替三种桌面应用到真实 ChatGPT 网页的往返。只有浏览器扩展已实际安装并且完成应用端真实收发，才算上线验收。

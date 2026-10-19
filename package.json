@@ -1,13 +1,14 @@
 {
   "name": "chatgpt-gateway",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OpenAI-compatible API gateway that uses your logged-in ChatGPT browser session",
   "type": "module",
   "license": "MIT",
   "scripts": {
     "start": "node server.mjs",
-    "build:chrome": "mkdir -p dist && cd dist && rm -f chatgpt-gateway-chrome.zip && zip -r chatgpt-gateway-chrome.zip ../manifest.json ../background.js ../content.js ../popup.html ../popup.js ../icons/",
-    "build:firefox": "mkdir -p dist && cd dist && rm -f chatgpt-gateway-firefox.zip && cp ../manifest.firefox.json manifest.json && zip -r chatgpt-gateway-firefox.zip manifest.json ../background.js ../content.js ../popup.html ../popup.js ../icons/ && rm manifest.json"
+    "test": "node --test tests/*.test.mjs",
+    "build:chrome": "node scripts/build-extension.mjs",
+    "start:hidden": "wscript.exe //B start-hidden.vbs"
   },
   "dependencies": {
     "ws": "^8.18.0"

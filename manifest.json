@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Gateway",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Local API gateway for ChatGPT — automates your logged-in session",
-  "permissions": ["activeTab", "scripting", "alarms"],
-  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "permissions": ["alarms"],
+  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*", "http://127.0.0.1/*"],
   "background": {
     "service_worker": "background.js"
   },

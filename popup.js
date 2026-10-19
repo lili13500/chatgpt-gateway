@@ -7,7 +7,7 @@ async function checkStatus() {
 
   // Check gateway server
   try {
-    const res = await fetch("http://localhost:18790/health");
+    const res = await fetch("http://127.0.0.1:18080/health");
     const data = await res.json();
     serverDot.className = "dot green";
     serverStatus.textContent = data.extensionConnected

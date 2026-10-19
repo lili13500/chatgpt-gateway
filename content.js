@@ -1,256 +1,172 @@
-// ChatGPT Gateway — Content script
-// Injected into chatgpt.com, handles DOM automation
-(function () {
+// ChatGPT webpage text relay; runs only in a dedicated inactive extension tab.
+(() => {
   "use strict";
+  const sleep = ms => new Promise(done => setTimeout(done, ms));
+  let current = null;
 
-  const POLL_INTERVAL = 1500;
-  const MAX_WAIT = 180_000; // 3 minutes
+  function flattenContent(content) {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) return content.map(item => {
+      if (typeof item === "string") return item;
+      if (item?.type === "text" && typeof item.text === "string") return item.text;
+      throw Error("Non-text input is unsupported by this webpage bridge");
+    }).join("\n");
+    if (content == null) return "";
+    throw Error("Unsupported message content: expected text");
+  }
+  function completePrompt(messages) {
+    if (!Array.isArray(messages) || !messages.some(m => m?.role === "user"))
+      throw Error("Missing user message");
+    if (messages.length === 1 && messages[0].role === "user")
+      return flattenContent(messages[0].content);
+    return messages.map(m => {
+      const role = { system: "System", developer: "Developer",
+        user: "User", assistant: "Assistant", tool: "Tool" }[m.role] || m.role;
+      return "[" + role + "]\n" + flattenContent(m.content);
+    }).join("\n\n");
+  }
 
-  // ── Helpers ──────────────────────────────────────────────
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-  function findInput() {
-    const selectors = [
-      "#prompt-textarea",
-      'div[contenteditable="true"][id="prompt-textarea"]',
-      "textarea",
-      '[contenteditable="true"]',
-    ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el && el.offsetParent !== null) return el;
+  const findComposer = () => {
+    for (const selector of ["#prompt-textarea", '[contenteditable="true"][data-testid="prompt-textarea"]',
+      'div[contenteditable="true"]', "textarea"]) {
+      const el = document.querySelector(selector);
+      if (el && !el.disabled && el.getAttribute("aria-hidden") !== "true") return el;
     }
     return null;
+  };
+  function composerText(input) {
+    return input.isContentEditable ? input.textContent || "" : input.value || "";
   }
-
-  function findSendButton() {
-    const selectors = [
-      '[data-testid="send-button"]',
-      "#composer-submit-button",
-      'button[aria-label="Send prompt"]',
-      'button[aria-label*="Send"]',
-    ];
-    for (const sel of selectors) {
-      const btn = document.querySelector(sel);
-      if (btn && !btn.disabled) return btn;
+  async function insertExact(text) {
+    let input;
+    for (let i = 0; i < 40; i++) {
+      input = findComposer();
+      if (input) break;
+      await sleep(250);
     }
-    return null;
-  }
-
-  function countAssistantMessages() {
-    return document.querySelectorAll(
-      '[data-message-author-role="assistant"]'
-    ).length;
-  }
-
-  function getLatestAssistantText() {
-    const els = document.querySelectorAll(
-      '[data-message-author-role="assistant"]'
-    );
-    if (els.length === 0) return "";
-    const last = els[els.length - 1];
-    return (last.textContent || "")
-      .replace(/[\u200B-\u200D\uFEFF]/g, "")
-      .trim();
-  }
-
-  function isStreaming() {
-    return !!document.querySelector(
-      'button[aria-label="Stop streaming"], [data-testid="stop-button"], button[aria-label*="Stop"]'
-    );
-  }
-
-  // ── Actions ──────────────────────────────────────────────
-
-  async function startNewChat() {
-    // Try the "New chat" button/link
-    const selectors = [
-      'a[href="/"]',
-      '[data-testid="create-new-chat-button"]',
-      'nav a[href="/"]',
-    ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el) {
-        el.click();
-        await sleep(1500);
-        return;
-      }
-    }
-    // Fallback: navigate
-    window.location.href = "https://chatgpt.com/";
-    await sleep(2500);
-  }
-
-  async function selectModel(modelSlug) {
-    if (!modelSlug) return;
-
-    // Try clicking the model picker
-    const pickerSelectors = [
-      '[data-testid="model-switcher"]',
-      'button[aria-haspopup="listbox"]',
-      'button[aria-haspopup="menu"]',
-    ];
-
-    let picker = null;
-    for (const sel of pickerSelectors) {
-      picker = document.querySelector(sel);
-      if (picker) break;
-    }
-
-    if (!picker) return; // No model picker found, proceed with default
-
-    picker.click();
-    await sleep(800);
-
-    // Find model option
-    const options = document.querySelectorAll(
-      '[role="option"], [role="menuitemradio"], [role="menuitem"]'
-    );
-    const slug = modelSlug.toLowerCase();
-    for (const opt of options) {
-      const text = (opt.textContent || "").toLowerCase();
-      if (text.includes(slug) || text.includes(slug.replace(/-/g, " "))) {
-        opt.click();
-        await sleep(500);
-        return;
-      }
-    }
-    // Close picker if model not found
-    document.body.click();
-    await sleep(300);
-  }
-
-  async function typeMessage(text) {
-    const input = findInput();
-    if (!input) throw new Error("Cannot find ChatGPT input field");
-
+    if (!input) throw Error("ChatGPT input not available (check login)");
     input.focus();
-    await sleep(200);
-
-    // Select all existing content and delete it
-    document.execCommand("selectAll");
-    document.execCommand("delete");
-    await sleep(100);
-
-    // Insert text — execCommand works with both textarea and contenteditable
-    // For long texts, chunk it to avoid issues
-    if (text.length > 4000) {
-      // For very long text, set directly and dispatch events
-      if (input.contentEditable === "true") {
-        // ProseMirror/contenteditable
-        const p = document.createElement("p");
-        p.textContent = text;
-        input.innerHTML = "";
-        input.appendChild(p);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-      } else {
-        input.value = text;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (input.isContentEditable) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand("insertText", false, text);
+      if (composerText(input) !== text) {
+        input.replaceChildren(document.createTextNode(text));
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
       }
     } else {
-      document.execCommand("insertText", false, text);
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      if (setter) setter.call(input, text); else input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
     }
-
-    await sleep(400);
-
-    // Verify text was entered
-    const currentText =
-      input.contentEditable === "true"
-        ? (input.textContent || "").trim()
-        : (input.value || "").trim();
-
-    if (!currentText) {
-      // Retry with direct assignment
-      if (input.contentEditable === "true") {
-        input.textContent = text;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-      } else {
-        input.value = text;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await sleep(400);
-    }
+    if (composerText(input) !== text) throw Error("Composer text mismatched; message NOT sent");
   }
 
-  async function clickSend() {
-    // Wait a moment for the send button to become enabled
-    for (let i = 0; i < 10; i++) {
-      const btn = findSendButton();
-      if (btn && !btn.disabled) {
-        btn.click();
-        return;
-      }
-      await sleep(300);
+  function sendButton() {
+    for (const selector of ['[data-testid="send-button"]', "#composer-submit-button",
+      'button[aria-label="Send prompt"]', 'button[aria-label*="Send"]']) {
+      const el = document.querySelector(selector);
+      if (el && !el.disabled) return el;
     }
-    throw new Error("Send button not found or disabled");
+    return null;
+  }
+  async function submit() {
+    for (let i = 0; i < 40; i++) {
+      const button = sendButton();
+      if (button) { button.click(); return; }
+      await sleep(200);
+    }
+    throw Error("ChatGPT send button not ready; request NOT sent");
   }
 
-  async function waitForNewResponse(beforeCount) {
-    let lastText = "";
-    let stableCount = 0;
-
-    for (let elapsed = 0; elapsed < MAX_WAIT; elapsed += POLL_INTERVAL) {
-      await sleep(POLL_INTERVAL);
-
-      const currentCount = countAssistantMessages();
-      if (currentCount <= beforeCount) continue; // No new response yet
-
-      const text = getLatestAssistantText();
-      const streaming = isStreaming();
-
-      if (text && text !== lastText) {
-        lastText = text;
-        stableCount = 0;
-      } else if (text) {
-        stableCount++;
-        if (!streaming && stableCount >= 2) {
-          return text;
-        }
-      }
-    }
-
-    if (lastText) return lastText;
-    throw new Error("Timeout: no response from ChatGPT");
+  const assistants = () => [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+  function assistantText(el) {
+    if (!el) return "";
+    const content = el.querySelector(".markdown") || el.querySelector("[data-testid='assistant-response']") || el;
+    return content.innerText ?? content.textContent ?? "";
   }
-
-  // ── Message handler ──────────────────────────────────────
-
-  async function handleChatRequest(msg) {
+  const isGenerating = () => !!document.querySelector(
+    'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label*="Stop generating"]'
+  );
+  function hasCompletionEvidence(el) {
+    if (!el) return false;
+    return !!el.querySelector(
+      '[data-testid="copy-turn-action-button"], button[aria-label="Copy"], ' +
+      'button[aria-label="Copy response"], button[data-testid="copy-button"]'
+    );
+  }
+  async function emit(requestId, type, details) {
     try {
-      const beforeCount = countAssistantMessages();
-
-      // Start new conversation if requested
-      if (msg.newConversation !== false) {
-        await startNewChat();
-        await selectModel(msg.model);
+      await chrome.runtime.sendMessage({ type, requestId, ...details });
+    } catch {
+      // A stopped client is not proof that the model completed; the server
+      // reports a transport failure and never commits a fake success.
+    }
+  }
+  async function monitor(job, beforeCount) {
+    let last = "", stable = 0, counter = 0;
+    for (;;) {
+      if (job.cancelled) throw Error("Request cancelled");
+      await sleep(350);
+      const nodes = assistants();
+      const el = nodes.length > beforeCount ? nodes[nodes.length - 1] : null;
+      const text = assistantText(el);
+      if (text !== last) {
+        last = text;
+        stable = 0;
+        if (el) await emit(job.requestId, "progress", { content: text });
+      } else if (el && text) stable++;
+      // Chrome extension service-worker stays active while the webpage is
+      // thinking silently. Repeating an unchanged snapshot emits no SSE token.
+      if (++counter % 55 === 0) await emit(job.requestId, "progress", { content: last });
+      // A stable text span alone is NOT completion: ChatGPT may still be
+      // thinking or streaming. Require its response action in this exact turn.
+      if (el && !isGenerating() && stable >= 2 && hasCompletionEvidence(el)) {
+        return assistantText(el);
       }
-
-      await typeMessage(msg.userMessage);
-      await clickSend();
-
-      const response = await waitForNewResponse(beforeCount);
-
-      return { ok: true, content: response };
-    } catch (err) {
-      return { ok: false, error: err.message };
+    }
+  }
+  async function start(msg) {
+    const requestId = msg.requestId;
+    const job = { requestId, cancelled: false };
+    current = job;
+    try {
+      // The worker created a fresh, inactive browser tab; it cannot change
+      // the user's current ChatGPT tab, model selection or draft.
+      const before = assistants().length;
+      const text = completePrompt(msg.messages);
+      await insertExact(text);
+      if (job.cancelled) throw Error("Cancelled before send");
+      await submit();
+      const final = await monitor(job, before);
+      await emit(requestId, "response", { ok: true, content: final });
+    } catch (error) {
+      await emit(requestId, "response", { ok: false, error: String(error.message || error) });
+    } finally {
+      if (current === job) current = null;
     }
   }
 
-  // ── Listen for messages from background script ───────────
-
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg.type === "ping") {
-      sendResponse({ ok: true, url: window.location.href });
-      return;
+  chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
+    if (msg?.type === "ping") {
+      respond({ ok: true, url: location.pathname });
+      return false;
     }
-
-    if (msg.type === "chat") {
-      handleChatRequest(msg).then(sendResponse);
-      return true; // Will respond asynchronously
+    if (msg?.type === "cancel" && current?.requestId === msg.requestId) {
+      current.cancelled = true;
+      respond({ ok: true });
+      return false;
     }
+    if (msg?.type === "chat") {
+      if (current) { respond({ accepted: false, error: "Tab already busy" }); return false; }
+      // ACK immediately; long completion travels by independent messages.
+      respond({ accepted: true });
+      void start(msg);
+      return false;
+    }
+    return false;
   });
-
-  console.log("[ChatGPT Gateway] Content script loaded on", window.location.href);
 })();

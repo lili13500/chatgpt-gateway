@@ -1,149 +1,106 @@
-// ChatGPT Gateway — Background service worker
-// Connects to local gateway server via WebSocket
+// Chrome extension owns its own inactive ChatGPT tab. No CDP and no focus theft.
 "use strict";
-
-const GATEWAY_URL = "ws://localhost:18790/ws";
+const GATEWAY_URL = "ws://127.0.0.1:18080/ws";
 let ws = null;
-let reconnectTimer = null;
+let retry = null;
+let active = null; // { requestId, tabId, cancelled }
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function log(...args) {
-  console.log("[Gateway BG]", ...args);
+function send(data) {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
 }
-
-function connect() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
-
-  try {
-    ws = new WebSocket(GATEWAY_URL);
-  } catch (err) {
-    log("WebSocket constructor failed:", err.message);
-    scheduleReconnect();
-    return;
-  }
-
-  ws.onopen = () => {
-    log("Connected to gateway server");
-    if (reconnectTimer) {
-      clearInterval(reconnectTimer);
-      reconnectTimer = null;
+function reconnect() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  try { ws = new WebSocket(GATEWAY_URL); } catch { schedule(); return; }
+  ws.onopen = () => { if (retry) clearInterval(retry); retry = null; };
+  ws.onmessage = event => {
+    let data;
+    try { data = JSON.parse(event.data); } catch { return; }
+    if (data.type === "chat") startRequest(data);
+    if (data.type === "cancel" && active?.requestId === data.requestId) {
+      active.cancelled = true;
+      chrome.tabs.sendMessage(active.tabId, { type: "cancel", requestId: data.requestId }).catch(() => {});
     }
   };
-
-  ws.onmessage = async (event) => {
-    let msg;
-    try {
-      msg = JSON.parse(event.data);
-    } catch {
-      log("Invalid JSON from server");
-      return;
-    }
-
-    if (msg.type === "chat") {
-      await handleChatMessage(msg);
-    }
-  };
-
   ws.onclose = () => {
-    log("Disconnected from gateway server");
     ws = null;
-    scheduleReconnect();
+    if (active) {
+      active.cancelled = true;
+      chrome.tabs.sendMessage(active.tabId, { type: "cancel", requestId: active.requestId }).catch(() => {});
+    }
+    schedule();
   };
-
-  ws.onerror = () => {
-    // onclose will fire after this
-    ws?.close();
-  };
+  ws.onerror = () => ws?.close();
 }
-
-function scheduleReconnect() {
-  if (!reconnectTimer) {
-    reconnectTimer = setInterval(connect, 5000);
-  }
+function schedule() {
+  if (!retry) retry = setInterval(reconnect, 5000);
 }
-
-function sendToServer(data) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-  }
+function emitError(requestId, error) {
+  send({ type: "response", requestId, ok: false, error: String(error) });
 }
-
-async function handleChatMessage(msg) {
-  // Find a ChatGPT tab
-  const tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*", "https://chat.openai.com/*"] });
-
-  if (tabs.length === 0) {
-    sendToServer({
-      type: "response",
-      requestId: msg.requestId,
-      ok: false,
-      error: "No ChatGPT tab open. Please navigate to chatgpt.com",
-    });
+async function dispose(job) {
+  if (active === job) active = null;
+  if (job?.tabId != null) await chrome.tabs.remove(job.tabId).catch(() => {});
+}
+async function startRequest(msg) {
+  if (active) {
+    emitError(msg.requestId, "Browser already has an active request");
     return;
   }
-
-  // Extract the last user message
-  const messages = msg.messages || [];
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  const userMessage = lastUser?.content || "";
-
-  if (!userMessage) {
-    sendToServer({
-      type: "response",
-      requestId: msg.requestId,
-      ok: false,
-      error: "No user message in request",
-    });
-    return;
-  }
-
-  // Try each tab until one responds (handles multiple ChatGPT tabs)
-  const errors = [];
-  for (const tab of tabs) {
-    try {
-      const response = await chrome.tabs.sendMessage(tab.id, {
-        type: "chat",
-        model: msg.model,
-        userMessage,
-        newConversation: msg.newConversation !== false,
-      });
-
-      sendToServer({
-        type: "response",
-        requestId: msg.requestId,
-        ok: response.ok,
-        content: response.content || "",
-        error: response.error || "",
-      });
-      return; // Success — stop trying other tabs
-    } catch (err) {
-      errors.push(`Tab ${tab.id}: ${err.message}`);
+  const job = { requestId: msg.requestId, tabId: null, cancelled: false };
+  active = job;
+  try {
+    // The gateway serializes requests. A disposable inactive tab prevents
+    // accidental interaction with the user's normal ChatGPT chat.
+    const tab = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
+    job.tabId = tab.id;
+    // New tabs inject content scripts after navigation. Wait for the receiver,
+    // not for a made-up model-generation timeout.
+    let delivered = false;
+    let lastError = "Content script not ready";
+    for (let attempt = 0; attempt < 60 && !job.cancelled; attempt++) {
+      try {
+        const reply = await chrome.tabs.sendMessage(job.tabId, {
+          type: "chat", requestId: job.requestId,
+          messages: msg.messages, model: msg.model,
+          newConversation: msg.newConversation,
+        });
+        if (reply?.accepted) { delivered = true; break; }
+        if (reply?.error) throw Error(reply.error);
+      } catch (e) {
+        lastError = String(e.message || e);
+      }
+      await sleep(500);
     }
+    if (!delivered && !job.cancelled) {
+      emitError(job.requestId, "ChatGPT page receiver unavailable: " + lastError);
+      await dispose(job);
+    }
+    if (job.cancelled) await dispose(job);
+  } catch (e) {
+    emitError(job.requestId, e.message || e);
+    await dispose(job);
   }
-
-  // All tabs failed
-  sendToServer({
-    type: "response",
-    requestId: msg.requestId,
-    ok: false,
-    error: `No ChatGPT tab responded (${tabs.length} tab(s) tried). Refresh chatgpt.com.\n${errors.join("\n")}`,
-  });
 }
 
-// Connect on startup
-connect();
-
-// Reconnect on service worker events
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
-
-// Keep service worker alive with periodic alarm
-chrome.alarms.create("keepAlive", { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "keepAlive") {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      connect();
-    }
-  }
+// The content script reports progress and completion independently.
+// No hours-long chrome.tabs.sendMessage Promise or five-minute message port.
+chrome.runtime.onMessage.addListener((msg, sender, respond) => {
+  if ((msg?.type !== "progress" && msg?.type !== "response") ||
+      !active || msg.requestId !== active.requestId ||
+      sender.tab?.id !== active.tabId) return false;
+  if (!active.cancelled) send(msg);
+  if (msg.type === "response") void dispose(active);
+  respond({ received: true });
+  return false;
 });
 
-log("Service worker started");
+reconnect();
+chrome.runtime.onStartup.addListener(reconnect);
+chrome.runtime.onInstalled.addListener(reconnect);
+chrome.alarms.create("gatewayReconnect", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === "gatewayReconnect") reconnect();
+});
+// Chrome 116+ keeps an active extension worker alive with WebSocket traffic.
+setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send('{"type":"heartbeat"}'); }, 20000);

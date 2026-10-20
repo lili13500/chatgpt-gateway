@@ -131,6 +131,8 @@ function receive(msg) {
 }
 
 wss.on("connection", ws => {
+  // A second tab must not replace the tab currently answering a request.
+  if (ready()) { ws.close(1013, "Another receiver is connected"); return; }
   if (extension && extension !== ws) {
     const previous = extension;
     extension = ws;
@@ -153,6 +155,43 @@ wss.on("connection", ws => {
   dispatchNext();
 });
 
+// Tampermonkey's granted HTTP API runs in its background context. It does
+// not depend on the website's native WebSocket route. One HTTP stream sends
+// work; ordered POSTs return progress, using the already-authorized loopback.
+function connectGrantedReceiver(req, res, clientId) {
+  if (ready() && !extension.transport && !activeId && pending.size === 0) {
+    const old = extension;
+    extension = null;
+    old.close(); // Replace only an idle legacy transport, never an active answer.
+  }
+  if (ready()) return json(res, 409, { error: "已有接收标签页连接，请保留一个专用页。" });
+  res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform", Connection: "keep-alive" });
+  const receiver = { clientId, transport: "tampermonkey-granted-http", readyState: 1,
+    send(raw, done) {
+      if (res.destroyed || res.writableEnded) return done?.(Error("Receiver disconnected"));
+      res.write("data: " + raw + "\n\n");
+      done?.();
+    },
+    close() { res.end(); },
+  };
+  extension = receiver;
+  receiver.send(JSON.stringify({ type: "connected", version: "1.3.0" }));
+  const keepalive = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) res.write(": ping\n\n");
+  }, 20000);
+  keepalive.unref();
+  res.once("close", () => {
+    clearInterval(keepalive);
+    receiver.readyState = 3;
+    if (extension !== receiver) return;
+    extension = null;
+    if (activeId) finish(activeId, { ok: false, error: "油猴接收连接关闭，未将半截回答标为成功。" });
+    for (const id of [...pending.keys()]) finish(id, { ok: false, error: "油猴接收连接关闭。" });
+  });
+  dispatchNext();
+}
+
 const server = createServer(async (req, res) => {
   const requestPath = new URL(req.url || "/", "http://127.0.0.1").pathname;
   const origin = req.headers.origin;
@@ -166,6 +205,36 @@ const server = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") return res.writeHead(204).end();
+  if (requestPath === "/userscript/events" || requestPath === "/userscript/message") {
+    const clientId = req.headers["x-gateway-client"];
+    if (req.headers["x-chatgpt-gateway"] !== "userscript-v1" ||
+        typeof clientId !== "string" || !/^[a-f0-9-]{36}$/i.test(clientId)) {
+      return json(res, 403, { error: "Missing userscript connection identity" });
+    }
+    if (req.method === "GET" && requestPath === "/userscript/events") {
+      return connectGrantedReceiver(req, res, clientId);
+    }
+    if (req.method !== "POST" || extension?.clientId !== clientId || !ready()) {
+      return json(res, 409, { error: "接收连接已断开；不重发原请求。" });
+    }
+    try {
+      const parts = [];
+      for await (const data of req) parts.push(data);
+      const msg = JSON.parse(Buffer.concat(parts).toString("utf8"));
+      if (!msg || typeof msg.requestId !== "string" || msg.requestId !== activeId) {
+        return json(res, 409, { error: "Request no longer active" });
+      }
+      receive(msg);
+      return json(res, 200, { accepted: true, requestId: msg.requestId });
+    } catch (error) {
+      return json(res, 400, { error: "Invalid userscript event: " + error.message });
+    }
+  }
+  if (req.method === "GET" && requestPath === "/") {
+    const page = await readFile(new URL("./status.html", import.meta.url));
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    return res.end(page);
+  }
   if (req.method === "GET" && requestPath === "/chatgpt-gateway.user.js") {
     // ChatGPT appends ?utm_source=... to links. Strip it so browsers see
     // the actual .user.js suffix for Tampermonkey install detection.
@@ -178,7 +247,8 @@ const server = createServer(async (req, res) => {
     return res.end(script);
   }
   if (req.method === "GET" && requestPath === "/health") {
-    return json(res, 200, { status: "ok", userscriptConnected: ready(), extensionConnected: ready(),
+    return json(res, 200, { status: "ok", version: "1.3.0", userscriptConnected: ready(), extensionConnected: ready(),
+      receiverTransport: ready() ? extension.transport || "legacy-websocket" : null,
       pendingRequests: pending.size, queued: queue.filter(id => pending.has(id)).length,
       active: !!activeId, transport: "chatgpt-web-tampermonkey" });
   }

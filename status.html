@@ -1,0 +1,10 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ChatGPT 网页桥接</title>
+<style>body{font:16px/1.7 "Microsoft YaHei",sans-serif;max-width:700px;margin:60px auto;padding:24px;color:#222}h1{font-size:26px}a,button{display:inline-block;padding:10px 18px;margin:8px 8px 8px 0;border:1px solid #ccc;border-radius:8px;background:white;color:#222;text-decoration:none}#status{padding:20px;background:#f4f5f6;border-radius:12px}small{color:#555}</style>
+<h1>ChatGPT 网页桥接</h1><p id="status">正在检查本机连接……</p>
+<p><a href="/chatgpt-gateway.user.js">安装 / 更新油猴脚本 1.3.0</a><a href="https://chatgpt.com/?web_gateway=1#web-gateway" target="_blank" rel="noopener">打开接收页</a></p>
+<p>接收页右下角会显示连接状态。看到“已连接”后，再从山海墨迹、Cherry Studio 或酒馆发送消息。</p>
+<p>应用接口：<code>http://127.0.0.1:18080/v1</code>，模型：<code>auto</code>。</p>
+<small>请使用安装了 Tampermonkey 的同一个 Chrome 用户资料。后台服务正常，不等于接收页已连接。网页聊天和应用回传未经实际验证时，不显示“验收通过”。</small>
+<script>async function check(){const el=document.getElementById('status');try{const h=await(await fetch('/health',{cache:'no-store'})).json();el.textContent=h.userscriptConnected?'网页已连接（'+h.receiverTransport+'）。待处理：'+h.pendingRequests:'后台服务正常，但网页未连接。先更新脚本，再打开接收页；页面没有状态提示时，请检查是否用了另一个 Chrome 用户资料。'}catch{el.textContent='本地后台未启动。请双击启动入口。'}}check();setInterval(check,2500);</script>
+</html>

@@ -5,3 +5,4 @@ dist/
 # machine-specific local config (absolute paths / internal notes) — not for the public repo
 .mcp.json
 .plan/
+.command-tower/

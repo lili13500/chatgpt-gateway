@@ -152,7 +152,8 @@ test("the userscript installer serves valid JavaScript, with no Chrome extension
   assert.match(js, /@name.*ChatGPT/);
   assert.match(js, /@match.*chatgpt\.com/);
   assert.match(js, /@connect\s+127\.0\.0\.1/);
-  assert.match(js, /new WebSocket/);
+  assert.match(js, /GM_xmlhttpRequest\(/);
+  assert.doesNotMatch(js, /new WebSocket\(/);
 });
 
 test("WebSocket with ChatGPT Origin header carries incremental UTF-8 chunks exactly", async t => {
@@ -184,4 +185,86 @@ test("a rewritten or truncated streaming result is an error, never a normal comp
   const raw = await (await request).text();
   assert.match(raw, /event: error/);
   assert.doesNotMatch(raw, /data: \[DONE\]/);
+});
+
+
+async function grantedReceiver(h, t) {
+  const headers = { 'X-ChatGPT-Gateway': 'userscript-v1',
+    'X-Gateway-Client': '11111111-1111-4111-8111-111111111111' };
+  const abort = new AbortController();
+  const response = await fetch(h.base + '/userscript/events', { headers, signal: abort.signal });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  t.after(() => { abort.abort(); void reader.cancel().catch(() => {}); });
+  let buffer = ''; const decoder = new TextDecoder();
+  async function take() {
+    for (;;) {
+      const end = buffer.indexOf('\n\n');
+      if (end >= 0) {
+        const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+        if (frame.startsWith('data: ')) return JSON.parse(frame.slice(6));
+        continue;
+      }
+      const result = await reader.read();
+      if (result.done) throw Error('Receiver stream ended');
+      buffer += decoder.decode(result.value, { stream: true });
+    }
+  }
+  const post = event => fetch(h.base + '/userscript/message', { method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(event) });
+  assert.equal((await take()).type, 'connected');
+  return { headers, take, post, abort };
+}
+
+test('granted HTTP receives full Unicode history and returns exact streamed answer', { timeout: 10000 }, async t => {
+  const h = await harness(t), receiver = await grantedReceiver(h, t);
+  assert.equal((await h.health()).receiverTransport, 'tampermonkey-granted-http');
+  const messages = Array.from({ length: 55 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: '历史' + i }));
+  messages.push({ role: 'user', content: '首' + '中'.repeat(1000000) + '尾' });
+  const request = submit(h.base, messages, true);
+  const packet = await receiver.take();
+  assert.deepEqual(packet.messages, messages);
+  const part = '逐字保留'.repeat(20000);
+  assert.equal((await receiver.post({ type: 'progress', requestId: packet.requestId, offset: 0, delta: part })).status, 200);
+  const tail = '完整结尾';
+  assert.equal((await receiver.post({ type: 'progress', requestId: packet.requestId, offset: part.length, delta: tail })).status, 200);
+  assert.equal((await receiver.post({ type: 'response', requestId: packet.requestId, ok: true, content: part + tail })).status, 200);
+  const raw = await (await request).text();
+  const frames = raw.split('\n').filter(s => s.startsWith('data: ') && !s.includes('[DONE]'));
+  assert.equal(frames.map(s => JSON.parse(s.slice(6)).choices[0].delta.content || '').join(''), part + tail);
+  assert.match(raw, /data: \[DONE\]/);
+});
+
+test('a second HTTP receiver cannot replace the active receiving tab', async t => {
+  const h = await harness(t), receiver = await grantedReceiver(h, t);
+  const second = await fetch(h.base + '/userscript/events', { headers: {
+    ...receiver.headers, 'X-Gateway-Client': '22222222-2222-4222-8222-222222222222' } });
+  assert.equal(second.status, 409);
+  assert.equal((await h.health()).userscriptConnected, true);
+  assert.equal((await fetch(h.base + '/userscript/events')).status, 403);
+});
+
+test('granted receiver disconnect terminates stream as error without fake completion', { timeout: 8000 }, async t => {
+  const h = await harness(t), receiver = await grantedReceiver(h, t);
+  const request = submit(h.base, [{ role: 'user', content: 'test' }], true);
+  const packet = await receiver.take();
+  assert.equal((await receiver.post({ type: 'progress', requestId: packet.requestId, offset: 0, delta: '前半句' })).status, 200);
+  receiver.abort.abort();
+  const raw = await (await request).text();
+  assert.match(raw, /event: error/);
+  assert.doesNotMatch(raw, /"finish_reason":"stop"|data: \[DONE\]/);
+});
+
+test('granted HTTP upgrades an idle legacy connection without stealing active work', async t => {
+  const h = await harness(t), ws = await connect(h.port);
+  t.after(() => ws.close());
+  const receiver = await grantedReceiver(h, t);
+  assert.equal((await h.health()).receiverTransport, 'tampermonkey-granted-http');
+  const req = submit(h.base, [{ role: 'user', content: 'test' }]);
+  const packet = await receiver.take();
+  const other = await fetch(h.base + '/userscript/events', { headers: {
+    ...receiver.headers, 'X-Gateway-Client': '22222222-2222-4222-8222-222222222222' } });
+  assert.equal(other.status, 409);
+  assert.equal((await receiver.post({ type: 'response', requestId: packet.requestId, ok: true, content: '完整' })).status, 200);
+  assert.equal((await (await req).json()).choices[0].message.content, '完整');
 });

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { webcrypto } from "node:crypto";
 
 const script = readFileSync("chatgpt-gateway.user.js", "utf8");
 
@@ -64,24 +65,32 @@ function pageHarness(enabled, storageUnavailable = false, sharedStorage = null, 
     },
     createTextNode(text) { return { textContent: text }; },
   };
-  class FakeSocket {
-    static OPEN = 1;
-    static CONNECTING = 0;
-    readyState = 1;
-    constructor(url) {
-      assert.equal(url, "ws://127.0.0.1:18080/ws");
-      socket = this;
-      websocketCount++;
-    }
-    send(text) {
-      const msg = JSON.parse(text);
+  function gmRequest(options) {
+    assert.equal(options.headers["X-ChatGPT-Gateway"], "userscript-v1");
+    if (options.method === "POST") {
+      assert.equal(options.url, "http://127.0.0.1:18080/userscript/message");
+      const msg = JSON.parse(options.data);
       posted.push(msg);
+      queueMicrotask(() => options.onload({ status: 200, responseText: '{"accepted":true}' }));
       if (msg.type === "response") responseResolve(msg);
+      return { abort() {} };
     }
-    close() { this.readyState = 3; this.onclose?.(); }
+    assert.equal(options.url, "http://127.0.0.1:18080/userscript/events");
+    assert.equal(options.responseType, "stream");
+    websocketCount++;
+    let controller;
+    const stream = new ReadableStream({ start(value) { controller = value; } });
+    const enqueue = object => controller.enqueue(new TextEncoder().encode("data: " + JSON.stringify(object) + "\n\n"));
+    socket = {
+      onopen() { void options.onloadstart({ status: 200, response: stream }); enqueue({ type: "connected" }); },
+      onmessage(packet) { enqueue(JSON.parse(packet.data)); },
+    };
+    return { abort() {} };
   }
+  document.addEventListener = () => {};
   const context = {
-    location, document, WebSocket: FakeSocket,
+    location, document, GM_xmlhttpRequest: gmRequest, crypto: webcrypto, TextDecoder,
+    WebSocket: class { constructor() { throw Error("Native WebSocket must not be used"); } },
     console: { info() {}, warn() {} },
     URL,
     sessionStorage: {

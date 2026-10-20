@@ -41,3 +41,13 @@ Fork 来源：Draivix/chatgpt-gateway · MIT，保留原始 Git 历史和 LICENS
 `npm ci` · `npm test` · `node server.mjs`
 
 原 Fork 在 `https://github.com/lili13500/chatgpt-gateway`。旧 Chrome 专用扩展源码已从当前分支去除，仍在 Git 历史中可回滚。
+
+## 1.3.0 通信修复
+
+新脚本使用已声明的 `GM_xmlhttpRequest` 和 `@connect 127.0.0.1`：一个 HTTP 接收流领取请求，按序 HTTP POST 回传增量。不再由脚本创建网页原生 WebSocket，也不修改网页 CSP、Chrome 权限或安全设置。服务器暂时保留旧 WebSocket 协议用于兼容旧脚本；不代表旧协议能在当前浏览器中正常工作。
+
+打开 `open-bridge.vbs`，会复用后台服务，并明确使用 Chrome 的 `Default` 用户资料打开本机状态页。当前这台电脑只有该资料安装了 Tampermonkey，不能依赖 Chrome 的“最近使用资料”去打开接收链接。
+
+更新脚本后，专用 ChatGPT 页右下角显示“网页桥接 1.3.0：已连接”或具体错误；不再静默失败。`/health` 新增 `version` 和 `receiverTransport`，可区分新版授权 HTTP 和旧 WebSocket。先完成浏览器更新确认，再进行真实应用收发；自动化单测仍不能代替此验收。
+
+文档依据：Tampermonkey 官方 `GM_xmlhttpRequest` 的 `responseType: stream` / `onloadstart` 和 `@connect` 权限。页面新对话使用实际“新聊天”按钮，不把返回主页当作新建聊天；完成动作在当前回答所在 turn 内查找。

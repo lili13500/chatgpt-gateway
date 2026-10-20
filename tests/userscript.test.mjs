@@ -15,6 +15,7 @@ function pageHarness(enabled, storageUnavailable = false, sharedStorage = null, 
   let answer = "";
   let visible = false;
   let complete = false;
+  let firstProgressReceived = false;
   const storage = sharedStorage || new Map();
   const chatUrl = actualUrl || (enabled ? "https://chatgpt.com/?web_gateway=1" : "https://chatgpt.com/");
   const location = {
@@ -34,12 +35,13 @@ function pageHarness(enabled, storageUnavailable = false, sharedStorage = null, 
   };
   const sendButton = {
     disabled: false,
+    getAttribute() { return null; },
     click() {
       sentPrompt = inputString;
       visible = true;
       setTimeout(() => { answer = "第一段"; }, 30);
-      setTimeout(() => { answer = "第一段完整的结尾。"; }, 450);
-      setTimeout(() => { complete = true; }, 1150);
+      // The simulated final response waits for the first progress POST,
+      // so this test checks real incremental delivery rather than timer luck.
     },
   };
   const assistant = {
@@ -57,6 +59,8 @@ function pageHarness(enabled, storageUnavailable = false, sharedStorage = null, 
       return null;
     },
     querySelectorAll(selector) {
+      if (selector.includes('send-button')) return [sendButton];
+      if (selector.includes('data-message-author-role="user"')) return visible ? [{}] : [];
       return selector.includes("assistant") && visible ? [assistant] : [];
     },
     execCommand(command, _ui, value) {
@@ -71,6 +75,13 @@ function pageHarness(enabled, storageUnavailable = false, sharedStorage = null, 
       assert.equal(options.url, "http://127.0.0.1:18080/userscript/message");
       const msg = JSON.parse(options.data);
       posted.push(msg);
+      if (msg.type === "progress" && !firstProgressReceived) {
+        firstProgressReceived = true;
+        assert.equal(msg.delta, "第一段");
+        assert.equal(complete, false);
+        setTimeout(() => { answer = "第一段完整的结尾。"; }, 30);
+        setTimeout(() => { complete = true; }, 450);
+      }
       queueMicrotask(() => options.onload({ status: 200, responseText: '{"accepted":true}' }));
       if (msg.type === "response") responseResolve(msg);
       return { abort() {} };

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 网页桥接 · 极简油猴版
 // @namespace    https://github.com/lili13500/chatgpt-gateway
-// @version      1.3.1
+// @version      1.3.2
 // @description  在专用 ChatGPT 网页标签中使用普通网页聊天，为本机写作工具回传回答。不调用 API/Codex。
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -46,7 +46,7 @@
 
   function showStatus(text) {
     statusText = text;
-    console.info("[Local Gateway 1.3.1] " + text);
+    console.info("[Local Gateway 1.3.2] " + text);
     const paint = () => {
       if (!document.body) return;
       let badge = document.getElementById("chatgpt-gateway-status");
@@ -57,7 +57,7 @@
         badge.style.cssText = "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:8px 12px;background:#fff;color:#222;border:1px solid #bbb;border-radius:8px;font:12px sans-serif;max-width:360px;pointer-events:none";
         document.body.appendChild(badge);
       }
-      badge.textContent = "网页桥接 1.3.1：" + statusText;
+      badge.textContent = "网页桥接 1.3.2：" + statusText;
     };
     if (document.body) paint();
     else document.addEventListener("DOMContentLoaded", paint, { once: true });
@@ -158,23 +158,60 @@
   }
 
   const sendSelectors = [
-    '[data-testid="send-button"]', "#composer-submit-button",
-    'button[aria-label="Send prompt"]', 'button[aria-label*="Send"]',
+    '[data-testid="send-button"]', '#composer-submit-button',
+    '[data-testid="composer-send-button"]',
+    'button[aria-label="发送"]', 'button[aria-label="发送提示"]',
+    'button[aria-label="发送消息"]', 'button[aria-label="傳送"]',
+    'button[aria-label="Send prompt"]', 'button[aria-label="Send message"]',
+    'button[aria-label="Send"]',
   ];
-  function sendButton() {
+  function availableButton(el) {
+    return !!el && !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
+      el.getAttribute('aria-hidden') !== 'true' && !el.hidden &&
+      (!el.getClientRects || el.getClientRects().length > 0);
+  }
+  function sendButton(input = findInput()) {
+    const form = input?.closest?.('form');
+    const scope = form || document;
     for (const selector of sendSelectors) {
-      const el = document.querySelector(selector);
-      if (el && !el.disabled) return el;
+      for (const el of scope.querySelectorAll(selector)) {
+        if (availableButton(el)) return el;
+      }
+    }
+    // A real submit button in the composer's form is language-independent.
+    // Never use an unrelated page form, microphone, or disabled control.
+    if (form) {
+      for (const el of form.querySelectorAll('button[type="submit"], input[type="submit"]')) {
+        if (availableButton(el)) return el;
+      }
     }
     return null;
   }
-  async function clickSend() {
-    for (let i = 0; i < 60; i++) {
-      const el = sendButton();
-      if (el) { el.click(); return; }
+  const userTurns = () => [...document.querySelectorAll('[data-message-author-role="user"]')];
+  async function clickSend(job, previousUserCount) {
+    // One submit attempt only. Receipt is the appearance of the new user turn,
+    // not .click() returning; a manual send during this phase is also observed.
+    let clicked = false;
+    let waitingAnnounced = false;
+    for (;;) {
+      if (job.cancelled) throw Error('请求已取消；没有再次点击发送。');
+      if (userTurns().length > previousUserCount) {
+        job.submitted = true;
+        return;
+      }
+      if (!clicked) {
+        const el = sendButton();
+        if (el) {
+          clicked = true;
+          el.click();
+          showStatus('已点击发送，正在确认网页收件');
+        } else if (!waitingAnnounced) {
+          waitingAnnounced = true;
+          showStatus('等待网页发送按钮就绪（自动提交，无需手动点击）');
+        }
+      }
       await sleep(250);
     }
-    throw Error("ChatGPT 发送按钮不可用，消息未提交。");
   }
 
   const assistants = () => [...document.querySelectorAll(
@@ -258,10 +295,11 @@
       await newChatIfNeeded(msg.newConversation !== false);
       if (job.cancelled) throw Error("请求在输入前取消。");
       const before = assistants().length;
+      const previousUserCount = userTurns().length;
       await typeExact(fullPrompt(msg.messages));
       if (job.cancelled) throw Error("请求在提交前取消。");
-      await clickSend();
-      showStatus("正在接收网页回答");
+      await clickSend(job, previousUserCount);
+      showStatus("网页已确认收件，正在自动回传回答");
       const answer = await awaitAnswer(job, before);
       if (current === job) current = null;
       await transmit({ type: "response", requestId: job.requestId, ok: true, content: answer });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 网页桥接 · 极简油猴版
 // @namespace    https://github.com/lili13500/chatgpt-gateway
-// @version      1.3.0
+// @version      1.3.1
 // @description  在专用 ChatGPT 网页标签中使用普通网页聊天，为本机写作工具回传回答。不调用 API/Codex。
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -46,7 +46,7 @@
 
   function showStatus(text) {
     statusText = text;
-    console.info("[Local Gateway 1.3.0] " + text);
+    console.info("[Local Gateway 1.3.1] " + text);
     const paint = () => {
       if (!document.body) return;
       let badge = document.getElementById("chatgpt-gateway-status");
@@ -57,7 +57,7 @@
         badge.style.cssText = "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:8px 12px;background:#fff;color:#222;border:1px solid #bbb;border-radius:8px;font:12px sans-serif;max-width:360px;pointer-events:none";
         document.body.appendChild(badge);
       }
-      badge.textContent = "网页桥接 1.3.0：" + statusText;
+      badge.textContent = "网页桥接 1.3.1：" + statusText;
     };
     if (document.body) paint();
     else document.addEventListener("DOMContentLoaded", paint, { once: true });
@@ -319,7 +319,13 @@
       attempt.handle = GM_xmlhttpRequest({ method: "GET", url: ENDPOINT + "/userscript/events",
         headers, anonymous: true, responseType: "stream",
         onloadstart: async result => {
-          if (result.status !== 200) { lost("连接失败：HTTP " + result.status); return; }
+          if (connection !== attempt) return;
+          // Tampermonkey fetch mode emits loadstart with status=0 before
+          // response headers. The stream is valid; only a positive HTTP
+          // failure status may reject it. The connected frame confirms readiness.
+          if (result.status > 0 && result.status !== 200) {
+            lost("连接失败：HTTP " + result.status); return;
+          }
           try {
             const reader = result.response.getReader();
             const decoder = new TextDecoder("utf-8");
@@ -337,6 +343,12 @@
             }
             lost("接收连接已关闭，正在重连");
           } catch (error) { lost("接收失败：" + error.message); }
+        },
+        onreadystatechange: result => {
+          if (connection === attempt && result.readyState >= 2 &&
+              result.status > 0 && result.status !== 200) {
+            lost("连接失败：HTTP " + result.status);
+          }
         },
         onerror: () => lost("油猴无法连接 127.0.0.1:18080；请检查本地服务或油猴授权。"),
         onabort: () => lost("接收连接已取消"),

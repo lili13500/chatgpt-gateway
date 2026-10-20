@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         ChatGPT 网页桥接 · 极简油猴版
 // @namespace    https://github.com/lili13500/chatgpt-gateway
-// @version      1.2.0
+// @version      1.2.1
 // @description  在专用 ChatGPT 网页标签中使用普通网页聊天，为本机写作工具回传回答。不调用 API/Codex。
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1

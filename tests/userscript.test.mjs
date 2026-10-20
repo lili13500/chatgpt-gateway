@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const script = readFileSync("chatgpt-gateway.user.js", "utf8");
 
-function pageHarness(enabled, storageUnavailable = false) {
+function pageHarness(enabled, storageUnavailable = false, sharedStorage = null, actualUrl = null) {
   let socket = null;
   let websocketCount = 0;
   let responseResolve;
@@ -14,8 +14,8 @@ function pageHarness(enabled, storageUnavailable = false) {
   let answer = "";
   let visible = false;
   let complete = false;
-  const storage = new Map();
-  const chatUrl = enabled ? "https://chatgpt.com/?web_gateway=1" : "https://chatgpt.com/";
+  const storage = sharedStorage || new Map();
+  const chatUrl = actualUrl || (enabled ? "https://chatgpt.com/?web_gateway=1" : "https://chatgpt.com/");
   const location = {
     href: chatUrl,
     pathname: "/",
@@ -140,4 +140,16 @@ test("dedicated ChatGPT tab sends the entire conversation without focus hijack",
 test("explicit gateway tab remains enabled if sandbox sessionStorage is unavailable", () => {
   const h = pageHarness(true, true);
   assert.equal(h.getWebsocketCount(), 1);
+});
+
+
+test("document-start saves the tab marker before a full ChatGPT redirect", () => {
+  assert.ok(script.includes("@run-at       document-start"));
+  const storage = new Map();
+  const first = pageHarness(true, false, storage);
+  assert.equal(first.getWebsocketCount(), 1);
+  const redirected = pageHarness(false, false, storage, "https://chatgpt.com/dots/home");
+  assert.equal(redirected.getWebsocketCount(), 1);
+  const ordinary = pageHarness(false);
+  assert.equal(ordinary.getWebsocketCount(), 0);
 });

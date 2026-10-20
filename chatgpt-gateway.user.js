@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 网页桥接 · 极简油猴版
 // @namespace    https://github.com/lili13500/chatgpt-gateway
-// @version      1.3.2
+// @version      1.3.3
 // @description  在专用 ChatGPT 网页标签中使用普通网页聊天，为本机写作工具回传回答。不调用 API/Codex。
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -187,28 +187,23 @@
     }
     return null;
   }
-  const userTurns = () => [...document.querySelectorAll('[data-message-author-role="user"]')];
-  async function clickSend(job, previousUserCount) {
-    // One submit attempt only. Receipt is the appearance of the new user turn,
-    // not .click() returning; a manual send during this phase is also observed.
-    let clicked = false;
+  async function clickSend(job) {
+    // Submit exactly once. A changing ChatGPT DOM may not expose a stable user-turn
+    // attribute, so answer detection below is the authoritative receipt. Never ask
+    // the user to click the page and never replay after a click.
     let waitingAnnounced = false;
     for (;;) {
-      if (job.cancelled) throw Error('请求已取消；没有再次点击发送。');
-      if (userTurns().length > previousUserCount) {
+      if (job.cancelled) throw Error('请求已取消；消息没有发送。');
+      const el = sendButton();
+      if (el) {
+        el.click();
         job.submitted = true;
+        showStatus('已自动发送，正在等待网页回答');
         return;
       }
-      if (!clicked) {
-        const el = sendButton();
-        if (el) {
-          clicked = true;
-          el.click();
-          showStatus('已点击发送，正在确认网页收件');
-        } else if (!waitingAnnounced) {
-          waitingAnnounced = true;
-          showStatus('等待网页发送按钮就绪（自动提交，无需手动点击）');
-        }
+      if (!waitingAnnounced) {
+        waitingAnnounced = true;
+        showStatus('等待网页发送按钮就绪（自动提交，无需手动点击）');
       }
       await sleep(250);
     }
@@ -295,11 +290,10 @@
       await newChatIfNeeded(msg.newConversation !== false);
       if (job.cancelled) throw Error("请求在输入前取消。");
       const before = assistants().length;
-      const previousUserCount = userTurns().length;
       await typeExact(fullPrompt(msg.messages));
       if (job.cancelled) throw Error("请求在提交前取消。");
-      await clickSend(job, previousUserCount);
-      showStatus("网页已确认收件，正在自动回传回答");
+      await clickSend(job);
+      showStatus("已自动发送，正在自动回传回答");
       const answer = await awaitAnswer(job, before);
       if (current === job) current = null;
       await transmit({ type: "response", requestId: job.requestId, ok: true, content: answer });
